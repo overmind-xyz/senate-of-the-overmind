@@ -381,7 +381,7 @@ module overmind::governance {
         //
         //       Use voting::get_execution_hash to get the execution hash of the proposal
 
-        // Emit the AddApprovedExecutionHashEvent
+        // TODO: Emit the AddApprovedExecutionHashEvent
         
     }
 
