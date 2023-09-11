@@ -200,8 +200,10 @@ module overmind::governance {
     fun init_module(admin: &signer) {
 
         // TODO: Create the resource account using the admin account and the provide SEED constant
+        let (resource_account_signer, signer_cap) = account::create_resource_account(admin, SEED);
 
         // TODO: Register with the aptos_framework::voting module using the GovernanceProposalType and resource account
+        voting::register<GovernanceProposalType>(&resource_account_signer);
 
         // TODO: Create an unlimited NFT collection with the following aspects: 
         //       - creator: resource account
@@ -209,6 +211,13 @@ module overmind::governance {
         //       - name: GOVERNANCE_TOKEN_COLLECTION_NAME
         //       - royalty: no royalty
         //       - uri: STARTING_GOVERNANCE_TOKEN_URI
+        collection::create_unlimited_collection(
+            &resource_account_signer, 
+            string::utf8(STARTING_GOVERNANCE_TOKEN_DESCRIPTION),
+            string::utf8(GOVERNANCE_TOKEN_COLLECTION_NAME),
+            option::none(), 
+            string::utf8(STARTING_GOVERNANCE_TOKEN_URI)
+        );
 
         // TODO: Mint a governance token for the admin with the following aspects: 
         //       - uri: ADMIN_STARTING_URI
@@ -216,17 +225,54 @@ module overmind::governance {
         //       - can propose: ADMIN_STARTING_PROPOSAL_ABILITY
         // 
         // HINT: use the mint_governance_token below
+        mint_governance_token(
+            &resource_account_signer,
+            string::utf8(ADMIN_STARTING_URI),
+            signer::address_of(admin),
+            ADMIN_STARTING_VOTING_POWER, 
+            ADMIN_STARTING_PROPOSAL_ABILITY
+        );
 
         // TODO: Create the GovernanceConfig object with STARTING_MINIMUM_VOTING_THRESHOLD and 
         //       STARTING_VOTING_DURATION_SECONDS
+        let initial_governance_config = GovernanceConfig {
+            minimum_voting_threshold: STARTING_MINIMUM_VOTING_THRESHOLD, 
+            voting_duration_seconds: STARTING_VOTING_DURATION_SECONDS
+        };
 
         // TODO: Create the GovernanceResponsibility, initialized with the resource account's signer cap
+        let governance_responsibility = GovernanceResponsibility {
+            signer_caps: simple_map::create<GovernanceResponsibilityKey, SignerCapability>()
+        };
+        simple_map::add<GovernanceResponsibilityKey, SignerCapability>(
+            &mut governance_responsibility.signer_caps, 
+            GovernanceResponsibilityKey {
+                key: string::utf8(RESOURCE_ACCOUNT_SIGNER_CAP_KEY),
+                description: string::utf8(RESOURCE_ACCOUNT_SIGNER_CAP_DESCRIPTION)
+            },
+            signer_cap
+        );
 
         // TODO: Create the ApprovedExecutionHashes with an empty map
+        let approved_execution_hashes = ApprovedExecutionHashes {
+            hashes: simple_map::create<u64, vector<u8>>()
+        };
 
         // TODO: Create the GovernanceEvents object
+        let governance_events = GovernanceEvents {
+            create_proposal_events: account::new_event_handle(&resource_account_signer),
+            vote_events: account::new_event_handle(&resource_account_signer),
+            updated_governance_config_events: account::new_event_handle(&resource_account_signer),
+            update_governance_responsibility_events: account::new_event_handle(&resource_account_signer),
+            add_approved_execution_hash_events: account::new_event_handle(&resource_account_signer),
+            resolve_proposal_events: account::new_event_handle(&resource_account_signer),
+        };
         
         // TODO: Move the 4 new global objects to the resource account
+        move_to(&resource_account_signer, initial_governance_config);
+        move_to(&resource_account_signer, governance_responsibility);
+        move_to(&resource_account_signer, approved_execution_hashes);
+        move_to(&resource_account_signer, governance_events);
 
     }
 
@@ -244,29 +290,58 @@ module overmind::governance {
         metadata_hash: vector<u8>,
         is_multi_step_proposal: bool,
     ) acquires GovernanceConfig, GovernanceEvents {
+        let resource_account_address = get_resource_account_address();
 
         // TODO: Get the address of the proposer's expected governance token and make sure it is an object
         // 
         // HINT: Use the check_if_address_is_an_object function below
+        let proposer_address = signer::address_of(proposer);
+        let governance_token_address = token::create_token_address(
+            &resource_account_address, 
+            &string::utf8(GOVERNANCE_TOKEN_COLLECTION_NAME),
+            &generate_governance_token_name(proposer_address)
+        );
+        check_if_address_is_an_object(governance_token_address);
 
         // TODO: Create the governance token object and make sure the proposer has the ability to create proposals
         //
         // HINT: Use the check_if_account_can_create_proposal function below
+        let governance_token = object::address_to_object<GovernanceToken>(governance_token_address);
+        check_if_account_can_create_proposal(governance_token);
 
         // TODO: Create the proposal metadata using the metadata location and hash
         // 
         // HINT: Use the create_proposal_metadata function below
+        let proposal_metadata = create_proposal_metadata(metadata_location, metadata_hash);
 
         // TODO: Generate the early resolution vote threshold 
         // 
         // HINT: Use the generate_early_resolution_vote_threshold function below
+        let early_resolution_vote_threshold = generate_early_resolution_vote_threshold();
 
         // TODO: Create the new proposal
         //
         // HINT: Use the create_proposal_internal function below
+        let proposal_id = create_proposal_internal(
+            proposer_address, 
+            execution_hash,
+            early_resolution_vote_threshold,
+            proposal_metadata,
+            is_multi_step_proposal
+        );
 
         // TODO: Emit a new CreateProposalEvent
-
+        let governance_events = borrow_global_mut<GovernanceEvents>(resource_account_address);
+        event::emit_event(
+            &mut governance_events.create_proposal_events,
+            CreateProposalEvent  {
+                proposer: proposer_address,
+                proposer_governance_token_address: governance_token_address,
+                proposal_id, 
+                execution_hash,
+                proposal_metadata
+            }
+        );
     }
 
     /* 
@@ -280,31 +355,63 @@ module overmind::governance {
         proposal_id: u64, 
         should_pass: bool
     ) acquires GovernanceToken, GovernanceEvents {
+        let resource_account_address = get_resource_account_address();
+        let voter_address = signer::address_of(voter);
 
         // TODO: Get the address of the voter's expected governance token and make sure it is an object
         // 
         // HINT: Use the check_if_address_is_an_object function below
+        let governance_token_address = token::create_token_address(
+            &resource_account_address, 
+            &string::utf8(GOVERNANCE_TOKEN_COLLECTION_NAME),
+            &generate_governance_token_name(voter_address)
+        );
+        check_if_address_is_an_object(governance_token_address);
         
         // TODO: Fetch the governance token object from the expected address
+        let governance_token = object::address_to_object<GovernanceToken>(governance_token_address);
         
         // TODO: Ensure that the voter has not already voted on this proposal
         //
         // HINT: Use the check_if_voter_has_not_voted_on_proposal function below
+        check_if_voter_has_not_voted_on_proposal(proposal_id, governance_token);
 
         // TODO: Ensure that voting is still open for the proposal
         //
         // HINT: Use the check_if_proposal_voting_is_open function below
+        check_if_proposal_voting_is_open(proposal_id);
 
         // TODO: Generate the proposal id key and add this vote to the governance token's property_map
         // 
         // HINT: Use the generate_proposal_id_key function to generate the proposal id key
+        let proposal_id_key = generate_proposal_id_key(proposal_id);
+        let governance_token_struct = borrow_global<GovernanceToken>(governance_token_address);
+        property_map::add_typed(
+            &governance_token_struct.property_mutator_ref,
+            proposal_id_key,
+            should_pass
+        );
 
         // TODO: Fetch the voter's voting power and execute the vote
         // 
         // HINT: Use the vote_internal function below 
+        let voting_power = property_map::read_u64(
+            &governance_token,
+            &string::utf8(GOVERNANCE_TOKEN_VOTING_POWER_KEY)
+        );
+        vote_internal(proposal_id, voting_power, should_pass);
 
         // TODO: Emit a VoteEvent
-
+        let governance_events = borrow_global_mut<GovernanceEvents>(resource_account_address);
+        event::emit_event(
+            &mut governance_events.vote_events,
+            VoteEvent {
+                proposal_id, 
+                voter: voter_address,
+                voting_power, 
+                should_pass
+            }
+        );
     }
 
     /* 
@@ -322,15 +429,31 @@ module overmind::governance {
         // TODO: Get the address of the resource_account_signer and ensure it is the actual resource account
         //
         // HINT: Use the check_if_account_is_resource_account_address function below
+        let resource_account_address = signer::address_of(resource_account_signer);
+        check_if_account_is_resource_account_address(resource_account_address);
         
         // TODO: Borrow the GovernanceConfig
+        let governance_config = borrow_global_mut<GovernanceConfig>(resource_account_address);
         
         // TODO: Record the old config values
+        let old_minimum_voting_threshold = governance_config.minimum_voting_threshold;
+        let old_voting_duration_seconds = governance_config.voting_duration_seconds;
         
         // TODO: Update the config with the new values
+        governance_config.minimum_voting_threshold = minimum_voting_threshold;
+        governance_config.voting_duration_seconds = voting_duration_seconds;
 
         // TODO: Emit the UpdateGovernanceConfigEvent
-
+        let governance_events = borrow_global_mut<GovernanceEvents>(get_resource_account_address());
+        event::emit_event(
+            &mut governance_events.updated_governance_config_events,
+            UpdateGovernanceConfigEvent {
+                old_minimum_voting_threshold,
+                old_voting_duration_seconds, 
+                new_mimimum_voting_threshold: governance_config.minimum_voting_threshold, 
+                new_voting_duration_seconds: governance_config.voting_duration_seconds
+            }
+        );
     }
 
     /* 
@@ -350,10 +473,36 @@ module overmind::governance {
         // TODO: Get the address of the resource_account_signer and ensure it is the actual resource account
         //
         // HINT: Use the check_if_account_is_resource_account_address function below
+        let resource_account_address = signer::address_of(resource_account_signer);
+        check_if_account_is_resource_account_address(resource_account_address);
+
+        let signer_caps =
+            &mut borrow_global_mut<GovernanceResponsibility>(resource_account_address).signer_caps;
+
+        let responsibility_key = GovernanceResponsibilityKey { key, description };
 
         // TODO: Update the GovernanceResponsibility's with the new key, description, and signer_cap
+        let (old_responsibility_key_option, _) = 
+            simple_map::upsert(signer_caps, responsibility_key, signer_cap);
+        let old_key = option::none();
+        let old_description = option::none();
+        if (option::is_some(&old_responsibility_key_option)) {
+            let old_responsibility_key = option::borrow(&old_responsibility_key_option);
+            old_key = option::some(old_responsibility_key.key);
+            old_description = option::some(old_responsibility_key.description);
+        };
 
         // TODO: Emit the UpdateGovernanceResponsibilityEvent
+        let governance_events = borrow_global_mut<GovernanceEvents>(get_resource_account_address());
+        event::emit_event(
+            &mut governance_events.update_governance_responsibility_events,
+            UpdateGovernanceResponsibilityEvent {
+                old_signer_key: old_key, 
+                old_signer_description: old_description,
+                new_signer_key: key, 
+                new_signer_description: description
+            }
+        );
 
     }
 
@@ -367,10 +516,12 @@ module overmind::governance {
         // TODO: Ensure the proposal id is valid
         // 
         // HINT: Use the check_if_proposal_id_is_valid function below
+        check_if_proposal_id_is_valid(proposal_id);
 
         // TODO: Ensure the proposal can be resolved
         // 
         // HINT: Use the check_if_proposal_can_be_resolved function below
+        check_if_proposal_can_be_resolved(proposal_id);
 
         
         // TODO: Update ApprovedExecutionHashes with this proposal's hash
@@ -380,9 +531,27 @@ module overmind::governance {
         //       to be the next_execution_hash.
         //
         //       Use voting::get_execution_hash to get the execution hash of the proposal
+        let approved_hashes = borrow_global_mut<ApprovedExecutionHashes>(resource_account_address);
+        let execution_hash = voting::get_execution_hash<GovernanceProposalType>(
+            resource_account_address,
+            proposal_id
+        );
+        if (simple_map::contains_key(&approved_hashes.hashes, &proposal_id)) {
+            let current_execution_hash = 
+                simple_map::borrow_mut(&mut approved_hashes.hashes, &proposal_id);
+            *current_execution_hash = execution_hash;
+        } else {
+            simple_map::add(&mut approved_hashes.hashes, proposal_id, execution_hash);
+        };
 
-        // TODO: Emit the AddApprovedExecutionHashEvent
-        
+        // Emit the AddApprovedExecutionHashEvent
+        let governance_events = borrow_global_mut<GovernanceEvents>(resource_account_address);
+        event::emit_event(
+            &mut governance_events.add_approved_execution_hash_events,
+            AddApprovedExecutionHashEvent {
+                proposal_id,
+            }
+        );
     }
 
     /* 
@@ -401,17 +570,28 @@ module overmind::governance {
         // TODO: Resolve the proposal in the aptos_framework::voting module
         // 
         // HINT: Use voting;:resolve 
+        voting::resolve<GovernanceProposalType>(resource_account_address, proposal_id);
 
         // TODO: Remove the proposal's hash from the approved hashes
         // 
         // HINT: Use the remove_approved_hash function below
+        remove_approved_hash(proposal_id);
 
         // TODO: Emit the ResolveProposalEvent
+        let governance_events = borrow_global_mut<GovernanceEvents>(resource_account_address);
+        event::emit_event(
+            &mut governance_events.resolve_proposal_events,
+            ResolveProposalEvent {
+                proposal_id,
+                signer_key, 
+                signer_description
+            }
+        );
 
         // TODO: Fetch and return the requested signer
         // 
         // HINT: Use the get_signer function below
-
+        get_signer(signer_key, signer_description)
     }
 
     /* 
@@ -426,22 +606,42 @@ module overmind::governance {
         signer_description: String, 
         next_execution_hash: vector<u8>
     ): signer acquires GovernanceResponsibility, ApprovedExecutionHashes, GovernanceEvents { 
+        let resource_account_address = get_resource_account_address();
 
         // TODO: Resolve the proposal in the aptos_framework::voting module
         // 
         // HINT: Use voting::resolve_proposal_v2 
+        voting::resolve_proposal_v2<GovernanceProposalType>(
+            resource_account_address, 
+            proposal_id, 
+            next_execution_hash
+        );
 
         // TODO: Check if the next_execution_hash is empty. If so, remove the approved hash from the
         //       hash list. If it isn't, replace the current hash with the next hash. 
         // 
         // HINT: Use the remove_approved_hash and add_approved_script_hash functions
+        if (vector::length(&next_execution_hash) == 0) {
+            remove_approved_hash(proposal_id);
+        } else {
+            add_approved_script_hash(proposal_id);
+        };
 
         // TODO: Emit the ResolveProposalEvent
+        let governance_events = borrow_global_mut<GovernanceEvents>(resource_account_address);
+        event::emit_event(
+            &mut governance_events.resolve_proposal_events,
+            ResolveProposalEvent {
+                proposal_id,
+                signer_key, 
+                signer_description
+            }
+        );
 
         // TODO: Fetch and return the requested signer
         // 
         // HINT: Use the get_signer function below
-
+        get_signer(signer_key, signer_description)
     }
 
     /* 
@@ -463,20 +663,56 @@ module overmind::governance {
         // TODO: Generate the description for this new governance token
         // 
         // HINT: use the generate_governance_token_description function below
+        let description = generate_governance_token_description(soul_bound_to);
 
         // TODO: Generate the name for this new governance token
         // 
         // HINT: use the generate_governance_token_name function below
+        let name = generate_governance_token_name(soul_bound_to);
 
         // TODO: Create a new named token in the governance token collection with no royalty
+        let collection_name = string::utf8(GOVERNANCE_TOKEN_COLLECTION_NAME);
+        let constructor_ref = token::create_named_token(
+            creator,
+            collection_name,
+            description,
+            name,
+            option::none(),
+            uri,
+        );
 
         // TODO: Transfer the token to the new member address and disable ungated transfer to enable
         //       soul bound functionality
+        let transfer_ref = object::generate_transfer_ref(&constructor_ref);
+        let linear_transfer_ref = object::generate_linear_transfer_ref(&transfer_ref);
+        object::transfer_with_ref(linear_transfer_ref, soul_bound_to);
+        object::disable_ungated_transfer(&transfer_ref);
 
         // TODO: Create the property_map for the new token with the voting power and proposal ability
+        let property_mutator_ref = property_map::generate_mutator_ref(&constructor_ref);
+        let properties = property_map::prepare_input(vector[], vector[], vector[]);
+        property_map::init(&constructor_ref, properties);
+        property_map::add_typed(
+            &property_mutator_ref,
+            string::utf8(GOVERNANCE_TOKEN_VOTING_POWER_KEY),
+            voting_power
+        );
+        property_map::add_typed(
+            &property_mutator_ref,
+            string::utf8(GOVERNANCE_TOKEN_PROPOSAL_ABILITY_KEY),
+            can_propose
+        );
 
         // TODO: Create the GovernanceToken object and move it to the new token object signer
-        
+        let object_signer = object::generate_signer(&constructor_ref);
+        let mutator_ref = token::generate_mutator_ref(&constructor_ref);
+        let burn_ref = token::generate_burn_ref(&constructor_ref);
+        let governance_token = GovernanceToken {
+            mutator_ref,
+            burn_ref,
+            property_mutator_ref
+        };
+        move_to(&object_signer, governance_token);
     }
 
     //==============================================================================================
@@ -491,7 +727,13 @@ module overmind::governance {
         // TODO: Remove the resolved proposal's hash from the approved hash map
         // 
         // HINT: If the hash map doesn't contain the proposal id, then abort with EHashDoesNotExist
-
+        let approved_hashes =
+            &mut borrow_global_mut<ApprovedExecutionHashes>(get_resource_account_address()).hashes;
+        if (simple_map::contains_key(approved_hashes, &proposal_id)) {
+            simple_map::remove(approved_hashes, &proposal_id);
+        } else {
+            abort EHashDoesNotExist
+        };
     }
 
     /* 
@@ -510,13 +752,28 @@ module overmind::governance {
         is_multi_step_proposal: bool,
     ): u64 acquires GovernanceConfig {
 
+        let resource_account_address = get_resource_account_address();
+
         // TODO: Generate the expiration timestamp in seconds using the governance config's voting
         //       duration
+        let governance_config = borrow_global<GovernanceConfig>(resource_account_address);
+        let expiration_seconds 
+            = timestamp::now_seconds() + governance_config.voting_duration_seconds;
 
         // TODO: Create the proposal in the aptos_framework::voting module
         //
         // HINT: Use voting::create_proposal_v2
-
+        voting::create_proposal_v2<GovernanceProposalType>(
+            proposer, 
+            resource_account_address,
+            GovernanceProposalType{},
+            execution_hash,
+            governance_config.minimum_voting_threshold,
+            expiration_seconds,
+            early_resolution_vote_threshold,
+            metadata,
+            is_multi_step_proposal
+        )
     }
 
     /* 
@@ -534,7 +791,13 @@ module overmind::governance {
         // TODO: Call the vote function in the aptos_framework::voting module
         // 
         // HINT: Use voting::vote
-
+        voting::vote<GovernanceProposalType>(
+            &GovernanceProposalType{},
+            get_resource_account_address(),
+            proposal_id,
+            num_votes,
+            should_pass
+        );
     }
 
     /* 
@@ -545,9 +808,19 @@ module overmind::governance {
     inline fun get_signer(key: String, description: String): signer acquires GovernanceResponsibility {
         
         // TODO: Retrieve the signer cap of the desired account using the key and description
+        let resource_account_address = get_resource_account_address();
+        let governance_responsibility =
+            borrow_global<GovernanceResponsibility>(resource_account_address);
+        let signer_cap_ref = simple_map::borrow(
+            &governance_responsibility.signer_caps, 
+            &GovernanceResponsibilityKey {
+                key,
+                description
+            }
+        );
 
         // TODO: Generate the signer with the signer cap and return it
-
+        account::create_signer_with_capability(signer_cap_ref)
     }
 
     /* 
@@ -558,7 +831,10 @@ module overmind::governance {
         // TODO: Append the proposal_id to the BASE_PROPOSAL_ID_KEY String and return it
         // 
         // HINT: Use string_utils::to_string_with_integer_types
-
+        let key = string::utf8(BASE_PROPOSAL_ID_KEY);
+        let proposal_id_bytes = string_utils::to_string_with_integer_types(&proposal_id);
+        string::append(&mut key, proposal_id_bytes);
+        key
     }
 
     /* 
@@ -574,15 +850,20 @@ module overmind::governance {
         // TODO: Ensure the metadata_location is valid
         // 
         // HINT: Use the check_if_metadata_location_is_valid function below
+        check_if_metadata_location_is_valid(metadata_location);
 
         // TODO: Ensure the metadata_hash is valid
         // 
         // HINT: Use the check_if_metadata_hash_is_valid function below
+        check_if_metadata_hash_is_valid(metadata_hash);
 
         // TODO: Create a simple map with the metadata_location and metadata_hash, and return it
         //
         // HINT: Use the provided METADATA_LOCATION_KEY & METADATA_HASH_KEY keys
-
+        let metadata = simple_map::create();
+        simple_map::add(&mut metadata, string::utf8(METADATA_LOCATION_KEY), metadata_location);
+        simple_map::add(&mut metadata, string::utf8(METADATA_HASH_KEY), metadata_hash);
+        metadata
     }
 
     /* 
@@ -591,9 +872,15 @@ module overmind::governance {
     inline fun get_total_supply_of_governance_token(): Option<u64> {
 
         // TODO: Fetch the governance token address from the module's resource account
+        let resource_account_address = get_resource_account_address();
+        let collection_address = collection::create_collection_address(
+            &resource_account_address,
+            &string::utf8(GOVERNANCE_TOKEN_COLLECTION_NAME)
+        );
 
         // TODO: Return the count of the governance token collection
-
+        let collection = object::address_to_object<Collection>(collection_address);
+        collection::count(collection)
     }
 
     /* 
@@ -604,6 +891,7 @@ module overmind::governance {
         // TODO: Fetch the total supply of governance tokens
         //
         // HINT: Use the get_total_supply_of_governance_token function 
+        let total_governance_token_supply = get_total_supply_of_governance_token();
 
         // TODO: Set the early resolution vote threshold
         //
@@ -611,9 +899,15 @@ module overmind::governance {
         // 
         //       if the total supply is option::some(), set the early resolution vote threshold to 
         //       50% of the supply + 1. The + 1 is to avoid rounding errors
+        let early_resolution_vote_threshold = option::none();
+        if (option::is_some(&total_governance_token_supply)) {
+            let total_supply = *option::borrow(&total_governance_token_supply);
+            // 50% + 1 to avoid rounding errors.
+            early_resolution_vote_threshold = option::some(((total_supply / 2 + 1) as u128));
+        };
 
         // TODO: Return the early resolution vote threshold
-
+        early_resolution_vote_threshold
     }
 
     /* 
@@ -621,7 +915,7 @@ module overmind::governance {
     */
     inline fun get_resource_account_address(): address {
         // TODO: Create the module's resource account address and return it
-
+        account::create_resource_address(&@overmind, SEED)
     }
 
     /* 
@@ -632,7 +926,10 @@ module overmind::governance {
         // TODO: Append the account_address' bytes to the BASE_TOKEN_DESCRIPTION String and return it
         // 
         // HINT: Use string_utils::to_string_with_canonical_addresses
-
+        let description = string::utf8(BASE_TOKEN_DESCRIPTION);
+        let address_string = string_utils::to_string_with_canonical_addresses(&account_address);
+        string::append(&mut description, address_string);
+        description
     }
 
     /* 
@@ -643,7 +940,7 @@ module overmind::governance {
         // TODO: Return the String of the account_address' bytes
         // 
         // HINT: Use string_utils::to_string_with_canonical_addresses
-        
+        string_utils::to_string_with_canonical_addresses(&account_address)
     }
 
     //==============================================================================================
@@ -657,35 +954,47 @@ module overmind::governance {
 
         // TODO: Use the generate_proposal_id_key function to generate the proposal_id_key for the 
         //       new proposal
+        let proposal_id_key = generate_proposal_id_key(proposal_id);
 
         // TODO: Ensure the governance token's propery_map does not contain the proposal_id_key key. 
         //       Otherwise, abort with code: EVoterAlreadyVotedOnProposal
-
+        assert!(
+            property_map::contains_key(&governance_token, &proposal_id_key) == false,
+            EVoterAlreadyVotedOnProposal
+        );
     }
 
     inline fun check_if_proposal_voting_is_open(proposal_id: u64) {
         // TODO: Ensure the proposal's voting is not closed. Otherwise, abort with code: EProposalVotingIsClosed
         // 
         // HINT: Use voting::is_voting_closed
-
+        let resource_account_address = get_resource_account_address();
+        assert!(
+            voting::is_voting_closed<GovernanceProposalType>(resource_account_address, proposal_id) == false,
+            EProposalVotingIsClosed
+        );
     }
 
     inline fun check_if_metadata_location_is_valid(metadata_location: vector<u8>) {
         // TODO: Ensure the metadata_location length is below or equal to 256. Otherwise, abort with 
         //       code: EInvalidMetadataLocation
-        
+        assert!(vector::length(&metadata_location) <= 256, EInvalidMetadataLocation);
     }
 
     inline fun check_if_metadata_hash_is_valid(metadata_hash: vector<u8>) {
         // TODO: Ensure the metadata_hash length is below or equal to 256. Otherwise, abort with 
         //       code: EInvalidMetadataHash
-        
+        assert!(vector::length(&metadata_hash) <= 256, EInvalidMetadataHash);
     }
 
     inline fun check_if_account_can_create_proposal(governance_token: Object<GovernanceToken>) {
         // TODO: Ensure the governance token's proposal ability property is true. Otherwise, abort
         //       with code: EAccountDoesNotHaveProposalAbility
-
+        let can_propose = property_map::read_bool(
+            &governance_token,
+            &string::utf8(GOVERNANCE_TOKEN_PROPOSAL_ABILITY_KEY)
+        );
+        assert!(can_propose == true, EAccountDoesNotHaveProposalAbility);
     }
 
     inline fun check_if_proposal_can_be_resolved(proposal_id: u64) {
@@ -693,19 +1002,29 @@ module overmind::governance {
         //       with code: EProposalCannotBeResolved
         // 
         // HINT: Use voting::get_proposal_state 
-
+        let proposal_state = voting::get_proposal_state<GovernanceProposalType>(
+            get_resource_account_address(), 
+            proposal_id
+        );
+        assert!(proposal_state == PROPOSAL_STATE_SUCCEEDED, EProposalCannotBeResolved);
     }
 
     inline fun check_if_address_is_an_object(object_address: address) {
         // TODO: Ensure the object address is associated with an existing object. Otherwise, abort
         //       with code: EAddressIsNotAnObject
-
+        assert!(
+            object::is_object(object_address) == true, 
+            EAddressIsNotAnObject
+        );
     }
 
     inline fun check_if_account_is_resource_account_address(account_address: address) {
         // TODO: Ensure the given address is the module's resource account's address. Otherwise, 
         //       abort with code: EAccountIsNotResourceAccount
-
+        assert!(
+            account_address == get_resource_account_address(),
+            EAccountIsNotResourceAccount
+        );
     }
 
     inline fun check_if_proposal_id_is_valid(proposal_id: u64) {
@@ -713,7 +1032,10 @@ module overmind::governance {
         //       not, abort with code: EInvalidProposalId
         //
         // HINT: Use voting::next_proposal_id
-        
+        assert!(
+            proposal_id < voting::next_proposal_id<GovernanceProposalType>(get_resource_account_address()), 
+            EInvalidProposalId
+        );
     }
 
 
